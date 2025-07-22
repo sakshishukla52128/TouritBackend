@@ -2,46 +2,378 @@ require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
+const bodyParser = require('body-parser');
+const axios = require('axios');
+const twilio = require('twilio');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const nodemailer = require('nodemailer');
+
 const app = express();
+const PORT = process.env.PORT || 5000;
 
 // Middleware
 app.use(cors());
-app.use(express.json());
+app.use(bodyParser.json());
 
 // MongoDB Connection
-mongoose.connect(process.env.MONGODB_URI, {
-    useNewUrlParser: true,
-    useUnifiedTopology: true
+mongoose.connect(process.env.MONGODB_URI || process.env.MONGO_URI, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true
 })
-.then(() => console.log('Connected to MongoDB Atlas'))
-.catch(err => console.error('Error connecting to MongoDB:', err));
+.then(() => console.log('✅ Connected to MongoDB'))
+.catch(err => console.error('❌ MongoDB connection error:', err));
 
-// Contact Schema and Model
+// === Twilio Setup ===
+const twilioSID = process.env.TWILIO_ACCOUNT_SID;
+const twilioAuth = process.env.TWILIO_AUTH_TOKEN;
+const twilioPhone = process.env.TWILIO_PHONE_NUMBER;
+const client = twilio(twilioSID, twilioAuth);
+
+// === Enhanced Nodemailer Setup ===
+const transporter = nodemailer.createTransport({
+  service: 'Gmail',
+  auth: {
+    user: process.env.GMAIL_USER,
+    pass: process.env.GMAIL_PASS
+  }
+});
+
+// Verify email configuration on startup
+transporter.verify((error) => {
+  if (error) {
+    console.error('❌ Mail server configuration error:', error);
+  } else {
+    console.log('✅ Mail server is ready to send messages');
+  }
+});
+
+// === Schemas ===
+const userSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  email: { type: String, required: true, unique: true },
+  password: { type: String, required: true }
+});
+
 const contactSchema = new mongoose.Schema({
-    name: { type: String, required: true },
-    email: { type: String, required: true },
-    phone: String,
-    subject: { type: String, required: true },
-    message: { type: String, required: true },
-    createdAt: { type: Date, default: Date.now }
-});
-
-const Contact = mongoose.model('Contact', contactSchema);
-
-// Routes
-app.post('/api/contact', async (req, res) => {
-    try {
-        const { name, email, phone, subject, message } = req.body;
-        const newContact = new Contact({ name, email, phone, subject, message });
-        await newContact.save();
-        res.status(201).json({ message: 'Contact form submitted successfully!' });
-    } catch (error) {
-        res.status(500).json({ error: 'Error submitting contact form' });
+  name: { type: String, required: true },
+  email: { type: String, required: true },
+  phone: { type: String },
+  subject: { type: String, required: true },
+  message: { type: String, required: true },
+  location: {
+    type: {
+      type: String,
+      enum: ['Point'],
+      required: true
+    },
+    coordinates: {
+      type: [Number],
+      required: true
     }
+  },
+  ipAddress: { type: String },
+  createdAt: { type: Date, default: Date.now }
 });
 
-// Start server
-const PORT = process.env.PORT || 5000;
+const cancellationRequestSchema = new mongoose.Schema({
+  paymentId: String,
+  destination: String,
+  contactNumber: String,
+  reason: { type: String, default: "Not specified" },
+  status: { type: String, default: "pending", enum: ["pending", "completed", "rejected"] },
+  createdAt: { type: Date, default: Date.now }
+});
+
+const User = mongoose.model('User', userSchema);
+const Contact = mongoose.model('Contact', contactSchema);
+const CancellationRequest = mongoose.model('CancellationRequest', cancellationRequestSchema);
+const Booking = require('./models/Booking');
+
+// Create 2dsphere index for geospatial queries
+contactSchema.index({ location: '2dsphere' });
+
+// === Auth Routes ===
+app.post('/api/auth/signup', async (req, res) => {
+  try {
+    const { name, email, password } = req.body;
+
+    const existingUser = await User.findOne({ email });
+    if (existingUser) return res.status(400).json({ success: false, message: 'Email already in use' });
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const user = new User({ name, email, password: hashedPassword });
+    await user.save();
+
+    res.status(201).json({ success: true, message: 'User created successfully' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    const user = await User.findOne({ email });
+    if (!user) return res.status(401).json({ success: false, message: 'Invalid credentials' });
+
+    const isMatch = await bcrypt.compare(password, user.password);
+    if (!isMatch) return res.status(401).json({ success: false, message: 'Invalid credentials' });
+
+    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET || 'your-secret-key', { expiresIn: '1h' });
+
+    res.json({ success: true, token, message: 'Login successful' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// === Contact Form with Dual Email Notifications ===
+app.post('/api/contact', async (req, res) => {
+  try {
+    const { name, email, phone, subject, message, coordinates } = req.body;
+    
+    // Validation
+    if (!name || !email || !subject || !message || !coordinates) {
+      return res.status(400).json({ success: false, error: 'Missing required fields' });
+    }
+
+    // Save to database
+    const newContact = new Contact({
+      name,
+      email,
+      phone,
+      subject,
+      message,
+      location: {
+        type: 'Point',
+        coordinates: coordinates
+      },
+      ipAddress: req.ip
+    });
+
+    await newContact.save();
+
+    // Email configurations
+    const emailPromises = [];
+    const mailResults = { admin: false, client: false };
+
+    // 1. Admin Notification Email
+    const adminMail = {
+      from: `"Contact Form" <${process.env.GMAIL_USER}>`,
+      to: process.env.ADMIN_EMAIL,
+      subject: `New Contact: ${subject}`,
+      html: `
+        <div style="font-family: Arial, sans-serif;">
+          <h2 style="color: #2c3e50;">New Contact Submission</h2>
+          <table style="width: 100%; border-collapse: collapse;">
+            <tr><td style="padding: 8px; border: 1px solid #ddd; width: 30%;"><strong>Name:</strong></td><td style="padding: 8px; border: 1px solid #ddd;">${name}</td></tr>
+            <tr><td style="padding: 8px; border: 1px solid #ddd;"><strong>Email:</strong></td><td style="padding: 8px; border: 1px solid #ddd;">${email}</td></tr>
+            <tr><td style="padding: 8px; border: 1px solid #ddd;"><strong>Phone:</strong></td><td style="padding: 8px; border: 1px solid #ddd;">${phone || 'Not provided'}</td></tr>
+            <tr><td style="padding: 8px; border: 1px solid #ddd;"><strong>Subject:</strong></td><td style="padding: 8px; border: 1px solid #ddd;">${subject}</td></tr>
+            <tr><td style="padding: 8px; border: 1px solid #ddd;"><strong>Message:</strong></td><td style="padding: 8px; border: 1px solid #ddd;">${message}</td></tr>
+            <tr><td style="padding: 8px; border: 1px solid #ddd;"><strong>Location:</strong></td><td style="padding: 8px; border: 1px solid #ddd;">${coordinates.join(', ')}</td></tr>
+            <tr><td style="padding: 8px; border: 1px solid #ddd;"><strong>IP Address:</strong></td><td style="padding: 8px; border: 1px solid #ddd;">${req.ip}</td></tr>
+          </table>
+        </div>
+      `
+    };
+
+    // 2. Client Confirmation Email
+    const clientMail = {
+      from: `"Tourism Support" <${process.env.GMAIL_USER}>`,
+      to: email,
+      subject: 'We Received Your Message!',
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+          <div style="background: #f8f9fa; padding: 20px; text-align: center;">
+            <h1 style="color: #2c3e50; margin: 0;">Thank You, ${name}!</h1>
+          </div>
+          <div style="padding: 20px;">
+            <p>We've received your message and will respond within 24 hours.</p>
+            <div style="background: #f1f1f1; padding: 15px; margin: 20px 0; border-left: 4px solid #3498db;">
+              <p><strong>Your Message:</strong></p>
+              <p>${message}</p>
+            </div>
+            <p>For urgent inquiries, please call our support team at +1 (555) 123-4567.</p>
+            <p style="margin-top: 30px;">Best regards,<br>The Tourism Team</p>
+          </div>
+          <div style="background: #f8f9fa; padding: 10px; text-align: center; font-size: 12px; color: #7f8c8d;">
+            <p>This is an automated message. Please do not reply directly to this email.</p>
+          </div>
+        </div>
+      `
+    };
+
+    // Send both emails
+    emailPromises.push(
+      transporter.sendMail(adminMail)
+        .then(() => { mailResults.admin = true; })
+        .catch(err => console.error('Admin email error:', err))
+    );
+
+    emailPromises.push(
+      transporter.sendMail(clientMail)
+        .then(() => { mailResults.client = true; })
+        .catch(err => console.error('Client email error:', err))
+    );
+
+    await Promise.all(emailPromises);
+
+    res.status(201).json({
+      success: true,
+      message: 'Contact form submitted successfully!',
+      emailsSent: mailResults
+    });
+
+  } catch (error) {
+    console.error('Contact form error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error',
+      details: error.message
+    });
+  }
+});
+
+// === Cancellation Requests ===
+app.post('/api/cancellation-requests', async (req, res) => {
+  try {
+    const { paymentId, destination, contactNumber, reason } = req.body;
+    const newRequest = new CancellationRequest({ paymentId, destination, contactNumber, reason });
+    const savedRequest = await newRequest.save();
+    res.status(201).json(savedRequest);
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.get('/api/cancellation-requests', async (req, res) => {
+  try {
+    const requests = await CancellationRequest.find().sort({ createdAt: -1 });
+    res.json(requests);
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// === Bookings ===
+app.post('/api/bookings', async (req, res) => {
+  try {
+    const { travelerInfo, addons, flightData, hotelData, carData, trainData, payment, bookingId, ...rest } = req.body;
+    const newBooking = new Booking({
+      ...rest,
+      travelerInfo,
+      addons,
+      flightData,
+      hotelData,
+      carData,
+      trainData,
+      payment,
+      bookingId
+    });
+    const savedBooking = await newBooking.save();
+    res.json(savedBooking);
+  } catch (error) {
+    console.error('Error saving booking:', error);
+    res.status(500).json({ error: 'Failed to save booking' });
+  }
+});
+
+app.get('/api/bookings/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const bookings = await Booking.find({ userId });
+    res.json(bookings);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch bookings' });
+  }
+});
+
+// === Refund ===
+app.post('/api/refund', async (req, res) => {
+  try {
+    const { payment_id, amount, reason } = req.body;
+
+    const refundResponse = await axios.post(
+      `https://api.razorpay.com/v1/payments/${payment_id}/refund`,
+      {
+        amount: Math.round(amount * 100),
+        speed: "normal",
+        notes: { reason: reason || "Customer requested refund" }
+      },
+      {
+        auth: {
+          username: process.env.RAZORPAY_KEY_ID,
+          password: process.env.RAZORPAY_KEY_SECRET
+        }
+      }
+    );
+
+    await Booking.findOneAndUpdate(
+      { "payment.razorpayPaymentId": payment_id },
+      {
+        "payment.status": 'cancelled',
+        cancellationDetails: {
+          date: new Date(),
+          reason,
+          refundAmount: amount,
+          refundId: refundResponse.data.id,
+          refundStatus: refundResponse.data.status
+        }
+      }
+    );
+
+    res.json({
+      success: true,
+      refund_id: refundResponse.data.id,
+      amount,
+      status: refundResponse.data.status
+    });
+
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.response?.data?.error?.description || 'Refund processing failed'
+    });
+  }
+});
+
+// === Twilio Call ===
+app.post('/api/call-user', async (req, res) => {
+  const { phoneNumber, placeName } = req.body;
+
+  try {
+    const twimlUrl = `https://${req.headers.host}/twiml/${encodeURIComponent(placeName)}`;
+    await client.calls.create({
+      url: twimlUrl,
+      to: phoneNumber,
+      from: twilioPhone,
+    });
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error making call:', err);
+    res.status(500).json({ error: 'Call failed' });
+  }
+});
+
+app.get('/twiml/:placeName', (req, res) => {
+  const place = req.params.placeName;
+  const twimlResponse = `
+    <Response>
+      <Say voice="alice">
+        Hello! Thank you for your interest in ${place}.
+        It is one of the most beautiful destinations with amazing attractions and facilities.
+        Visit our website to book now!
+      </Say>
+    </Response>
+  `;
+  res.type('text/xml');
+  res.send(twimlResponse);
+});
+
+// === Start Server ===
 app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
+  console.log(`🚀 Server running at http://localhost:${PORT}`);
 });
