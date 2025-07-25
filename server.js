@@ -3,10 +3,10 @@ const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const bodyParser = require('body-parser');
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
 const axios = require('axios');
 const twilio = require('twilio');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
 const nodemailer = require('nodemailer');
 
 const app = express();
@@ -30,7 +30,7 @@ const twilioAuth = process.env.TWILIO_AUTH_TOKEN;
 const twilioPhone = process.env.TWILIO_PHONE_NUMBER;
 const client = twilio(twilioSID, twilioAuth);
 
-// === Nodemailer Setup ===
+// === Enhanced Nodemailer Setup ===
 const transporter = nodemailer.createTransport({
   service: 'Gmail',
   auth: {
@@ -52,15 +52,7 @@ transporter.verify((error) => {
 const userSchema = new mongoose.Schema({
   name: { type: String, required: true },
   email: { type: String, required: true, unique: true },
-  password: { type: String, required: true },
-  verified: { type: Boolean, default: false },
-  createdAt: { type: Date, default: Date.now }
-});
-
-const otpSchema = new mongoose.Schema({
-  email: { type: String, required: true, unique: true },
-  otp: { type: String, required: true },
-  otpExpiry: { type: Date, required: true }
+  password: { type: String, required: true }
 });
 
 const contactSchema = new mongoose.Schema({
@@ -93,155 +85,29 @@ const cancellationRequestSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now }
 });
 
-const bookingSchema = new mongoose.Schema({
-  userId: { type: mongoose.Schema.Types.ObjectId, required: true },
-  travelerInfo: Object,
-  addons: Object,
-  flightData: Object,
-  hotelData: Object,
-  carData: Object,
-  trainData: Object,
-  payment: Object,
-  bookingId: String,
-  createdAt: { type: Date, default: Date.now }
-});
-
 const User = mongoose.model('User', userSchema);
-const OTP = mongoose.model('OTP', otpSchema);
 const Contact = mongoose.model('Contact', contactSchema);
 const CancellationRequest = mongoose.model('CancellationRequest', cancellationRequestSchema);
-const Booking = mongoose.model('Booking', bookingSchema);
+const Booking = require('./models/Booking');
 
 // Create 2dsphere index for geospatial queries
 contactSchema.index({ location: '2dsphere' });
 
-// === Utility Functions ===
-const generateOTP = () => Math.floor(100000 + Math.random() * 900000).toString();
-
 // === Auth Routes ===
-app.post('/api/auth/send-otp', async (req, res) => {
-  try {
-    const { email } = req.body;
-    
-    if (!email) {
-      return res.status(400).json({ success: false, message: 'Email is required' });
-    }
-
-    const otp = generateOTP();
-    const otpExpiry = new Date(Date.now() + 10 * 60000); // 10 minutes expiry
-
-    // Store OTP in DB
-    await OTP.findOneAndUpdate(
-      { email },
-      { otp, otpExpiry },
-      { upsert: true, new: true }
-    );
-
-    // Send email
-    const mailOptions = {
-      to: email,
-      subject: 'Your Verification OTP',
-      html: `
-        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-          <div style="background: #f8f9fa; padding: 20px; text-align: center;">
-            <h2 style="color: #2c3e50;">Your OTP Code</h2>
-          </div>
-          <div style="padding: 20px;">
-            <p>Your verification code is:</p>
-            <div style="font-size: 24px; font-weight: bold; margin: 20px 0; letter-spacing: 3px;">${otp}</div>
-            <p>This code will expire in 10 minutes.</p>
-          </div>
-          <div style="background: #f8f9fa; padding: 10px; text-align: center; font-size: 12px;">
-            <p>If you didn't request this code, please ignore this email.</p>
-          </div>
-        </div>
-      `
-    };
-
-    await transporter.sendMail(mailOptions);
-    
-    res.json({ success: true, message: 'OTP sent successfully' });
-  } catch (err) {
-    console.error('OTP send error:', err);
-    res.status(500).json({ success: false, message: 'Failed to send OTP. Please try again.' });
-  }
-});
-
-app.post('/api/auth/verify-otp', async (req, res) => {
-  try {
-    const { email, otp } = req.body;
-    
-    if (!email || !otp) {
-      return res.status(400).json({ success: false, message: 'Email and OTP are required' });
-    }
-
-    const otpRecord = await OTP.findOne({ email });
-    
-    if (!otpRecord) {
-      return res.status(400).json({ success: false, message: 'No OTP requested for this email' });
-    }
-
-    if (otpRecord.otp !== otp) {
-      return res.status(400).json({ success: false, message: 'Invalid OTP' });
-    }
-
-    if (otpRecord.otpExpiry < new Date()) {
-      await OTP.deleteOne({ email });
-      return res.status(400).json({ success: false, message: 'OTP has expired' });
-    }
-
-    // Delete the used OTP
-    await OTP.deleteOne({ email });
-    
-    res.json({ success: true, message: 'OTP verified successfully' });
-  } catch (err) {
-    console.error('OTP verification error:', err);
-    res.status(500).json({ success: false, message: 'OTP verification failed' });
-  }
-});
-
 app.post('/api/auth/signup', async (req, res) => {
   try {
     const { name, email, password } = req.body;
 
     const existingUser = await User.findOne({ email });
-    if (existingUser) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Email already in use' 
-      });
-    }
+    if (existingUser) return res.status(400).json({ success: false, message: 'Email already in use' });
 
     const hashedPassword = await bcrypt.hash(password, 10);
-    const user = new User({ 
-      name, 
-      email, 
-      password: hashedPassword,
-      verified: true
-    });
-    
+    const user = new User({ name, email, password: hashedPassword });
     await user.save();
 
-    // Generate JWT token
-    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { 
-      expiresIn: '1h' 
-    });
-
-    res.status(201).json({ 
-      success: true, 
-      message: 'User created successfully',
-      token,
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email
-      }
-    });
+    res.status(201).json({ success: true, message: 'User created successfully' });
   } catch (err) {
-    res.status(500).json({ 
-      success: false, 
-      message: err.message 
-    });
+    res.status(500).json({ success: false, message: err.message });
   }
 });
 
@@ -250,52 +116,30 @@ app.post('/api/auth/login', async (req, res) => {
     const { email, password } = req.body;
 
     const user = await User.findOne({ email });
-    if (!user) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Invalid credentials' 
-      });
-    }
+    if (!user) return res.status(401).json({ success: false, message: 'Invalid credentials' });
 
     const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Invalid credentials' 
-      });
-    }
+    if (!isMatch) return res.status(401).json({ success: false, message: 'Invalid credentials' });
 
-    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { 
-      expiresIn: '1h' 
-    });
+    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET || 'your-secret-key', { expiresIn: '1h' });
 
-    res.json({ 
-      success: true, 
-      token, 
-      message: 'Login successful',
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email
-      }
-    });
+    res.json({ success: true, token, message: 'Login successful' });
   } catch (err) {
-    res.status(500).json({ 
-      success: false, 
-      message: err.message 
-    });
+    res.status(500).json({ success: false, message: err.message });
   }
 });
 
-// === Contact Form ===
+// === Contact Form with Dual Email Notifications ===
 app.post('/api/contact', async (req, res) => {
   try {
     const { name, email, phone, subject, message, coordinates } = req.body;
     
+    // Validation
     if (!name || !email || !subject || !message || !coordinates) {
       return res.status(400).json({ success: false, error: 'Missing required fields' });
     }
 
+    // Save to database
     const newContact = new Contact({
       name,
       email,
@@ -527,22 +371,6 @@ app.get('/twiml/:placeName', (req, res) => {
   `;
   res.type('text/xml');
   res.send(twimlResponse);
-});
-
-// === Temporary route to verify all users ===
-app.get('/verify-all-users', async (req, res) => {
-  try {
-    const result = await User.updateMany({}, { $set: { verified: true } });
-    res.json({
-      success: true,
-      message: `Successfully verified ${result.modifiedCount} users`
-    });
-  } catch (err) {
-    res.status(500).json({ 
-      success: false, 
-      message: err.message 
-    });
-  }
 });
 
 // === Start Server ===
