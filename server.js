@@ -52,7 +52,10 @@ transporter.verify((error) => {
 const userSchema = new mongoose.Schema({
   name: { type: String, required: true },
   email: { type: String, required: true, unique: true },
-  password: { type: String, required: true }
+  password: { type: String, required: true },
+  verified: { type: Boolean, default: false },
+  otp: String,
+  otpExpires: Date
 });
 
 const contactSchema = new mongoose.Schema({
@@ -85,10 +88,23 @@ const cancellationRequestSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now }
 });
 
+const bookingSchema = new mongoose.Schema({
+  travelerInfo: Object,
+  addons: Object,
+  flightData: Object,
+  hotelData: Object,
+  carData: Object,
+  trainData: Object,
+  payment: Object,
+  bookingId: String,
+  userId: String,
+  createdAt: { type: Date, default: Date.now }
+});
+
 const User = mongoose.model('User', userSchema);
 const Contact = mongoose.model('Contact', contactSchema);
 const CancellationRequest = mongoose.model('CancellationRequest', cancellationRequestSchema);
-const Booking = require('./models/Booking');
+const Booking = mongoose.model('Booking', bookingSchema);
 
 // Create 2dsphere index for geospatial queries
 contactSchema.index({ location: '2dsphere' });
@@ -102,10 +118,46 @@ app.post('/api/auth/signup', async (req, res) => {
     if (existingUser) return res.status(400).json({ success: false, message: 'Email already in use' });
 
     const hashedPassword = await bcrypt.hash(password, 10);
-    const user = new User({ name, email, password: hashedPassword });
+    const otp = Math.floor(100000 + Math.random() * 900000).toString(); // 6 digit OTP
+
+    const user = new User({ 
+      name, 
+      email, 
+      password: hashedPassword,
+      otp,
+      otpExpires: Date.now() + 10 * 60 * 1000 // 10 min expiry
+    });
     await user.save();
 
-    res.status(201).json({ success: true, message: 'User created successfully' });
+    // Send OTP email
+    await transporter.sendMail({
+      from: process.env.GMAIL_USER,
+      to: email,
+      subject: 'Your OTP Code',
+      html: `<h2>Welcome ${name}!</h2><p>Your OTP is <b>${otp}</b></p><p>It will expire in 10 minutes.</p>`
+    });
+
+    res.status(201).json({ success: true, message: 'OTP sent to your email. Please verify.' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+app.post('/api/auth/verify-otp', async (req, res) => {
+  try {
+    const { email, otp } = req.body;
+    const user = await User.findOne({ email });
+    
+    if (!user) return res.status(400).json({ success: false, message: 'User not found' });
+    if (user.otp !== otp) return res.status(400).json({ success: false, message: 'Invalid OTP' });
+    if (user.otpExpires < Date.now()) return res.status(400).json({ success: false, message: 'OTP expired' });
+
+    user.verified = true;
+    user.otp = null;
+    user.otpExpires = null;
+    await user.save();
+
+    res.json({ success: true, message: 'Account verified! You can now log in.' });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -118,12 +170,19 @@ app.post('/api/auth/login', async (req, res) => {
     const user = await User.findOne({ email });
     if (!user) return res.status(401).json({ success: false, message: 'Invalid credentials' });
 
+    if (!user.verified) return res.status(401).json({ success: false, message: 'Please verify your email first.' });
+
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) return res.status(401).json({ success: false, message: 'Invalid credentials' });
 
-    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET || 'your-secret-key', { expiresIn: '1h' });
+    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET || 'your-secret-key', { expiresIn: '7d' });
 
-    res.json({ success: true, token, message: 'Login successful' });
+    res.json({ 
+      success: true, 
+      token, 
+      user: { name: user.name, email: user.email },
+      message: 'Login successful' 
+    });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -261,9 +320,8 @@ app.get('/api/cancellation-requests', async (req, res) => {
 // === Bookings ===
 app.post('/api/bookings', async (req, res) => {
   try {
-    const { travelerInfo, addons, flightData, hotelData, carData, trainData, payment, bookingId, ...rest } = req.body;
+    const { travelerInfo, addons, flightData, hotelData, carData, trainData, payment, bookingId, userId } = req.body;
     const newBooking = new Booking({
-      ...rest,
       travelerInfo,
       addons,
       flightData,
@@ -271,7 +329,8 @@ app.post('/api/bookings', async (req, res) => {
       carData,
       trainData,
       payment,
-      bookingId
+      bookingId,
+      userId
     });
     const savedBooking = await newBooking.save();
     res.json(savedBooking);
@@ -359,7 +418,7 @@ app.post('/api/call-user', async (req, res) => {
 });
 
 app.get('/twiml/:placeName', (req, res) => {
-  const place = req.params.placeName;
+  const place = decodeURIComponent(req.params.placeName);
   const twimlResponse = `
     <Response>
       <Say voice="alice">
