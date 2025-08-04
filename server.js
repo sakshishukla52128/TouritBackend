@@ -95,6 +95,7 @@ const bookingSchema = new mongoose.Schema({
   hotelData: Object,
   carData: Object,
   trainData: Object,
+  busData: Object,
   payment: Object,
   bookingId: String,
   userId: String,
@@ -320,7 +321,8 @@ app.get('/api/cancellation-requests', async (req, res) => {
 // === Bookings ===
 app.post('/api/bookings', async (req, res) => {
   try {
-    const { travelerInfo, addons, flightData, hotelData, carData, trainData, payment, bookingId, userId } = req.body;
+    const { travelerInfo, addons, flightData, hotelData, carData, trainData, busData, payment, bookingId, userId } = req.body;
+    
     const newBooking = new Booking({
       travelerInfo,
       addons,
@@ -328,15 +330,100 @@ app.post('/api/bookings', async (req, res) => {
       hotelData,
       carData,
       trainData,
+      busData,
       payment,
       bookingId,
       userId
     });
+
     const savedBooking = await newBooking.save();
-    res.json(savedBooking);
+
+    // Send emails to both admin and user
+    const emailPromises = [];
+    const mailResults = { admin: false, user: false };
+
+    // 1. Admin Notification Email
+    const adminMail = {
+      from: `"Booking System" <${process.env.GMAIL_USER}>`,
+      to: process.env.ADMIN_EMAIL,
+      subject: `New Booking: ${bookingId}`,
+      html: `
+        <div style="font-family: Arial, sans-serif;">
+          <h2 style="color: #2c3e50;">New Booking Received</h2>
+          <table style="width: 100%; border-collapse: collapse;">
+            <tr><td style="padding: 8px; border: 1px solid #ddd; width: 30%;"><strong>Booking ID:</strong></td><td style="padding: 8px; border: 1px solid #ddd;">${bookingId}</td></tr>
+            <tr><td style="padding: 8px; border: 1px solid #ddd;"><strong>Traveler:</strong></td><td style="padding: 8px; border: 1px solid #ddd;">${travelerInfo.name}</td></tr>
+            <tr><td style="padding: 8px; border: 1px solid #ddd;"><strong>Email:</strong></td><td style="padding: 8px; border: 1px solid #ddd;">${travelerInfo.email}</td></tr>
+            <tr><td style="padding: 8px; border: 1px solid #ddd;"><strong>Phone:</strong></td><td style="padding: 8px; border: 1px solid #ddd;">${travelerInfo.phone}</td></tr>
+            <tr><td style="padding: 8px; border: 1px solid #ddd;"><strong>Amount Paid:</strong></td><td style="padding: 8px; border: 1px solid #ddd;">₹${payment.amount}</td></tr>
+            <tr><td style="padding: 8px; border: 1px solid #ddd;"><strong>Payment ID:</strong></td><td style="padding: 8px; border: 1px solid #ddd;">${payment.razorpayPaymentId}</td></tr>
+          </table>
+          <h3 style="color: #2c3e50; margin-top: 20px;">Booking Details</h3>
+          <p>Please check the admin dashboard for complete booking details.</p>
+        </div>
+      `
+    };
+
+    // 2. User Confirmation Email
+    const userMail = {
+      from: `"Tourism Booking" <${process.env.GMAIL_USER}>`,
+      to: travelerInfo.email,
+      subject: `Your Booking Confirmation - ${bookingId}`,
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+          <div style="background: #f8f9fa; padding: 20px; text-align: center;">
+            <h1 style="color: #2c3e50; margin: 0;">Booking Confirmed!</h1>
+          </div>
+          <div style="padding: 20px;">
+            <p>Dear ${travelerInfo.name},</p>
+            <p>Thank you for booking with us. Here are your booking details:</p>
+            
+            <div style="background: #f1f1f1; padding: 15px; margin: 20px 0; border-left: 4px solid #3498db;">
+              <p><strong>Booking ID:</strong> ${bookingId}</p>
+              <p><strong>Amount Paid:</strong> ₹${payment.amount}</p>
+              <p><strong>Payment Status:</strong> ${payment.status}</p>
+            </div>
+            
+            <p>You can view your booking details anytime by logging into your account.</p>
+            <p>If you have any questions, please contact our support team.</p>
+            
+            <p style="margin-top: 30px;">Best regards,<br>The Tourism Team</p>
+          </div>
+          <div style="background: #f8f9fa; padding: 10px; text-align: center; font-size: 12px; color: #7f8c8d;">
+            <p>This is an automated message. Please do not reply directly to this email.</p>
+          </div>
+        </div>
+      `
+    };
+
+    // Send both emails
+    emailPromises.push(
+      transporter.sendMail(adminMail)
+        .then(() => { mailResults.admin = true; })
+        .catch(err => console.error('Admin email error:', err))
+    );
+
+    emailPromises.push(
+      transporter.sendMail(userMail)
+        .then(() => { mailResults.user = true; })
+        .catch(err => console.error('User email error:', err))
+    );
+
+    await Promise.all(emailPromises);
+
+    res.json({
+      success: true,
+      booking: savedBooking,
+      emailsSent: mailResults
+    });
+
   } catch (error) {
     console.error('Error saving booking:', error);
-    res.status(500).json({ error: 'Failed to save booking' });
+    res.status(500).json({ 
+      success: false,
+      error: 'Failed to save booking',
+      details: error.message
+    });
   }
 });
 
