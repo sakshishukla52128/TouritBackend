@@ -55,7 +55,9 @@ const userSchema = new mongoose.Schema({
   password: { type: String, required: true },
   verified: { type: Boolean, default: false },
   otp: String,
-  otpExpires: Date
+  otpExpires: Date,
+  resetPasswordToken: String,
+  resetPasswordExpire: Date
 });
 
 const contactSchema = new mongoose.Schema({
@@ -186,6 +188,72 @@ app.post('/api/auth/login', async (req, res) => {
     });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+app.post('/api/auth/forgot-password', async (req, res) => {
+  const { email } = req.body;
+
+  try {
+    const user = await User.findOne({ email });
+
+    if (!user) return res.status(400).json({ success: false, message: 'User not found with this email' });
+
+    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET || 'secret', { expiresIn: '15m' });
+
+    user.resetPasswordToken = token;
+    user.resetPasswordExpire = Date.now() + 15 * 60 * 1000; // 15 minutes
+    await user.save();
+
+    const resetLink = `http://localhost:3000/reset-password/${token}`;
+
+    await transporter.sendMail({
+      from: process.env.GMAIL_USER,
+      to: user.email,
+      subject: 'Password Reset Request',
+      html: `
+        <p>Hello ${user.name},</p>
+        <p>You requested to reset your password.</p>
+        <p>Click the link below to reset it. This link expires in 15 minutes:</p>
+        <a href="${resetLink}" target="_blank">${resetLink}</a>
+        <p>If you did not request this, please ignore this email.</p>
+      `
+    });
+
+    res.json({ success: true, message: 'Reset link sent to your email.' });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+app.post('/api/auth/reset-password/:token', async (req, res) => {
+  const { token } = req.params;
+  const { password } = req.body;
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret');
+    const user = await User.findOne({
+      _id: decoded.userId,
+      resetPasswordToken: token,
+      resetPasswordExpire: { $gt: Date.now() }
+    });
+
+    if (!user) {
+      return res.status(400).json({ success: false, message: 'Invalid or expired token' });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+    user.password = hashedPassword;
+    user.resetPasswordToken = undefined;
+    user.resetPasswordExpire = undefined;
+    await user.save();
+
+    res.json({ success: true, message: 'Password reset successful' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 
