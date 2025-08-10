@@ -205,7 +205,7 @@ app.post('/api/auth/forgot-password', async (req, res) => {
     user.resetPasswordExpire = Date.now() + 15 * 60 * 1000; // 15 minutes
     await user.save();
 
-    const resetLink = `http://localhost:3000/reset-password/${token}`;
+    const resetLink = `https://touritbackend.onrender.com/reset-password/${token}`;
 
     await transporter.sendMail({
       from: process.env.GMAIL_USER,
@@ -589,5 +589,5 @@ app.get('/twiml/:placeName', (req, res) => {
 
 // === Start Server ===
 app.listen(PORT, () => {
-  console.log(`🚀 Server running at http://localhost:${PORT}`);
+  console.log(`🚀 Server running at https://touritbackend.onrender.com:${PORT}`);
 });
