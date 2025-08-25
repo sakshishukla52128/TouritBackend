@@ -104,10 +104,17 @@ const bookingSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now }
 });
 
+const feedbackSchema = new mongoose.Schema({
+  rating: Number,
+  improvement: String,
+  createdAt: { type: Date, default: Date.now }
+});
+
 const User = mongoose.model('User', userSchema);
 const Contact = mongoose.model('Contact', contactSchema);
 const CancellationRequest = mongoose.model('CancellationRequest', cancellationRequestSchema);
 const Booking = mongoose.model('Booking', bookingSchema);
+const Feedback = mongoose.model("Feedback", feedbackSchema);
 
 // Create 2dsphere index for geospatial queries
 contactSchema.index({ location: '2dsphere' });
@@ -457,7 +464,7 @@ app.post('/api/bookings', async (req, res) => {
             
             <p style="margin-top: 30px;">Best regards,<br>The Tourism Team</p>
           </div>
-          <div style="background: #f8f9fa; padding: 10px; text-align: center; font-size: 12px; color: #7f8c8d;">
+          <div style="background: 'f8f9fa'; padding: 10px; text-align: center; font-size: 12px; color: '#7f8c8d';">
             <p>This is an automated message. Please do not reply directly to this email.</p>
           </div>
         </div>
@@ -585,6 +592,18 @@ app.get('/twiml/:placeName', (req, res) => {
   `;
   res.type('text/xml');
   res.send(twimlResponse);
+});
+
+// === Feedback Routes ===
+app.post("/api/feedback", async (req, res) => {
+  try {
+    const { rating, improvement } = req.body;
+    const newFeedback = new Feedback({ rating, improvement });
+    await newFeedback.save();
+    res.status(201).json({ message: "Feedback saved successfully!" });
+  } catch (err) {
+    res.status(500).json({ error: "Error saving feedback" });
+  }
 });
 
 // === Start Server ===
