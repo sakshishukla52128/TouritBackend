@@ -91,7 +91,12 @@ const cancellationRequestSchema = new mongoose.Schema({
 });
 
 const bookingSchema = new mongoose.Schema({
-  travelerInfo: Object,
+  travelerInfo: {
+    name: { type: String, required: true },
+    email: { type: String, required: true },
+    phone: { type: String, required: true },
+    travelerNames: { type: [String], default: [] } // New field for traveler names
+  },
   addons: Object,
   flightData: Object,
   hotelData: Object,
@@ -416,6 +421,11 @@ app.post('/api/bookings', async (req, res) => {
     // Send emails to both admin and user
     const emailPromises = [];
     const mailResults = { admin: false, user: false };
+
+    // Format traveler names for email
+    const travelerNamesHtml = travelerInfo.travelerNames && travelerInfo.travelerNames.length > 0
+      ? `<ul>${travelerInfo.travelerNames.map(name => `<li>${name}</li>`).join('')}</ul>`
+      : 'N/A';
 
     // 1. Admin Notification Email
     const adminMail = {
