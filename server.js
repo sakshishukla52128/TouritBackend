@@ -616,6 +616,63 @@ app.post("/api/feedback", async (req, res) => {
   }
 });
 
+// === Chatbot Routes ===
+app.post('/api/chatbot', async (req, res) => {
+  try {
+    const { question } = req.body;
+    
+    if (!question || question.trim() === '') {
+      return res.status(400).json({ error: 'Question is required' });
+    }
+
+    // Enhanced prompt for tourist assistant
+    const prompt = `You are a helpful and knowledgeable tourist assistant for India and international travel. 
+    Answer the following question about travel, tourism, places, packages, or any travel-related topic.
+    Provide detailed, helpful information with practical tips.
+    
+    User Question: ${question}
+    
+    Please provide a comprehensive answer with:
+    - Specific recommendations
+    - Practical tips
+    - Best time to visit (if applicable)
+    - Budget considerations (if applicable)
+    - Local insights`;
+
+    // Call Google Gemini API
+    const response = await axios.post(
+      `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      {
+        contents: [{
+          parts: [{
+            text: prompt
+          }]
+        }]
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+        }
+      }
+    );
+
+    const answer = response.data.candidates?.[0]?.content?.parts?.[0]?.text || 'Sorry, I could not generate an answer at the moment.';
+    
+    res.json({ 
+      success: true, 
+      answer: answer,
+      timestamp: new Date().toISOString()
+    });
+
+  } catch (error) {
+    console.error('Chatbot API Error:', error.response?.data || error.message);
+    res.status(500).json({ 
+      error: 'Failed to get response from AI assistant',
+      details: error.response?.data?.error?.message || error.message
+    });
+  }
+});
+
 // === Start Server ===
 app.listen(PORT, () => {
   console.log(`🚀 Server running at http://localhost:${PORT}`);
