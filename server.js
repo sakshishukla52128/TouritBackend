@@ -636,9 +636,10 @@ app.post('/api/chatbot', async (req, res) => {
     - Budget considerations (if applicable)
     - Local insights`;
 
-    // Call Google Gemini API
+    // Call Google Gemini API (use a valid model from listModels)
+    const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
     const response = await axios.post(
-      `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      `https://generativelanguage.googleapis.com/v1/models/${GEMINI_MODEL}:generateContent?key=${process.env.GEMINI_API_KEY}`,
       {
         contents: [{
           parts: [{
